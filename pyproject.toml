@@ -1,5 +1,78 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "verdictai"
 version = "0.1.0"
-requires-python = ">=3.14"
-dependencies = []
+description = "Enterprise level legal document agent"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "ipykernel==7.2.0",
+  "jupyterlab==4.5.7",
+  "docling==2.92.0",
+  "pydantic==2.13.1",
+  "pydantic-settings==2.13.1",
+  "python-dotenv==1.2.2",
+  "PyYAML==6.0.2,<7",
+]
+
+[project.scripts]
+verdictai = "main:main"
+
+[tool.setuptools.packages.find]
+include = ["verdictai*"]
+
+[project.optional-dependencies]
+dev = [
+  "mypy==1.20.1",
+  "pre-commit==4.5.1",
+  "pytest==9.0.3",
+  "ruff==0.15.10",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+addopts = "-ra"
+testpaths = ["tests"]
+markers = [
+  "integration: tests that exercise multi-component flows",
+  "slow: tests that load larger models or run long integration paths",
+]
+
+[tool.ruff]
+line-length = 88
+target-version = "py311"
+
+[tool.ruff.lint]
+select = [
+  "E",
+  "F",
+  "I",
+  "B",
+  "C4",
+  "PIE",
+  "RET",
+  "RUF",
+  "SIM",
+  "T20",
+  "UP",
+]
+ignore = [
+  "E501",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"eval/run_eval.py" = ["T201"]
+"tests/**/*.py" = ["T201"]
+
+[tool.mypy]
+python_version = "3.14"
+strict = false
+ignore_missing_imports = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_unreachable = true
+pretty = true
+show_error_codes = true
