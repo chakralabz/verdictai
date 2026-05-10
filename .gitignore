@@ -317,3 +317,6 @@ node_modules/
 
 # temporarily ignore tests
 tests/
+
+# agents
+.agents/
