@@ -9,14 +9,16 @@ description = "Enterprise level legal document agent"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-  "ipykernel==7.2.0",
-  "jupyterlab==4.5.7",
+  "docling==2.93.0",
+  "docling-core>=2.74.1",
+  "rapidocr_onnxruntime==1.4.4",
+  "tiktoken==0.12.0",
+
+  "pydantic==2.13.4",
+  "pydantic-settings==2.14.1",
+
   "python-dotenv==1.2.2",
-  "docling==2.92.0",
-  "pydantic==2.13.1",
-  "pydantic-settings==2.13.1",
-  "python-dotenv==1.2.2",
-  "PyYAML==6.0.2",
+  "PyYAML==6.0.3",
 ]
 
 [project.scripts]
@@ -26,11 +28,25 @@ verdictai = "main:main"
 include = ["verdictai*"]
 
 [project.optional-dependencies]
+
+# local development
 dev = [
-  "mypy==1.20.1",
-  "pre-commit==4.5.1",
+  "mypy==2.0.0",
+  "pre-commit==4.6.0",
   "pytest==9.0.3",
-  "ruff==0.15.10",
+  "ruff==0.15.12",
+]
+
+# notebooks / experimentation
+notebook = [
+  "ipykernel==7.2.0",
+  "jupyterlab==4.5.7",
+  "jupyter-ai==3.0.0",
+]
+
+# all-in-one convenience
+all = [
+  "verdictai[dev,notebook]"
 ]
 
 [tool.pytest.ini_options]
@@ -69,7 +85,7 @@ ignore = [
 "tests/**/*.py" = ["T201"]
 
 [tool.mypy]
-python_version = "3.14"
+python_version = "3.11"
 strict = false
 ignore_missing_imports = true
 warn_redundant_casts = true

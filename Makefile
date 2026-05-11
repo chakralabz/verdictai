@@ -1,5 +1,11 @@
 .PHONY: format lint test eval ingest serve precommit
 
+
+uv-sync-dev:
+	uv sync --extra dev --extra notebook
+uv-sync-prod:
+	RUN uv sync --frozen --no-dev
+
 format:
 	uv run --extra dev ruff format .
 
