@@ -1,4 +1,4 @@
-"""Parser interfaces and implementations for the ingestion pipeline."""
+"""Parser interfaces, schemas, and Docling-backed implementations."""
 
 from __future__ import annotations
 
@@ -7,15 +7,26 @@ from .api import (
     create_parser,
     parse_document,
     parse_document_async,
-    stream_document_progress,
 )
+from .docling import DoclingParser, DoclingParserConfig
 from .document_parser import DocumentParserProtocol
+from .schemas import (
+    DocumentFigureInspection,
+    DocumentParseProgress,
+    DocumentParseResult,
+    ParsedBlock,
+)
 
 __all__ = [
+    "DoclingParser",
+    "DoclingParserConfig",
+    "DocumentFigureInspection",
+    "DocumentParseProgress",
+    "DocumentParseResult",
     "DocumentParserProtocol",
+    "ParsedBlock",
     "collect_document_progress",
     "create_parser",
     "parse_document",
     "parse_document_async",
-    "stream_document_progress",
 ]

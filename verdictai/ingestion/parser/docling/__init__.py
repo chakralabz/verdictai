@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 from ..schemas import DocumentFigureInspection, DocumentParseProgress
-from .docling_parser import DoclingParser, DoclingParserConfig, DoclingParserError
+from .docling_parser import DoclingParser, DoclingParserConfig
 
 __all__ = [
     "DoclingParser",
     "DoclingParserConfig",
-    "DoclingParserError",
     "DocumentFigureInspection",
     "DocumentParseProgress",
 ]

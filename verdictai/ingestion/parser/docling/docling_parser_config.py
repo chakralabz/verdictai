@@ -1,23 +1,12 @@
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final, Literal
+from typing import Literal
 
-DOCLING_ARTIFACTS_ENV_VAR: Final[str] = "DOCLING_ARTIFACTS_PATH"
-MODEL_CACHE_ENV_VARS: Final[tuple[str, ...]] = (
-    "DOCLING_MODEL_DIR",
-    "HF_HOME",
-    "HUGGINGFACE_HUB_CACHE",
-    "TRANSFORMERS_CACHE",
-    "SENTENCE_TRANSFORMERS_HOME",
-    "TORCH_HOME",
+from verdictai.ingestion.parser.docling.constants import (
+    DOCLING_ARTIFACTS_ENV_VAR,
+    MODEL_CACHE_ENV_VARS,
 )
-QUIET_RUNTIME_ENV_VARS: Final[dict[str, str]] = {
-    "HF_HUB_DISABLE_PROGRESS_BARS": "1",
-    "TOKENIZERS_PARALLELISM": "false",
-    "TQDM_DISABLE": "1",
-    "TRANSFORMERS_VERBOSITY": "error",
-}
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -39,6 +28,10 @@ class DoclingParserConfig:
         suppress_progress_bars: When True, disables Hugging Face and tqdm progress UI.
         suppress_runtime_warnings: When True, ignores known notebook-only warnings such
             as missing `ipywidgets` progress integrations.
+        include_docling_document: Whether parse metadata should include the serialized
+            Docling document needed by Docling-native chunkers. Disable this when a
+            caller only needs `ParsedBlock` records and wants a smaller payload.
+        stream_page_progress: When True, streams page by page progress indication to user.
         model_cache_dir: Optional directory to use for model caching. When unset,
             `resolve_model_cache_dir()` falls back to common environment variables.
         artifact_dir: Optional directory to use for Docling artifact storage. When
@@ -64,6 +57,8 @@ class DoclingParserConfig:
     suppress_external_logs: bool = True
     suppress_progress_bars: bool = True
     suppress_runtime_warnings: bool = True
+    include_docling_document: bool = True
+    stream_page_progress: bool = False
     model_cache_dir: Path | None = None
     artifact_dir: Path | None = None
 

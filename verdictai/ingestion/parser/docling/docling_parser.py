@@ -1,10 +1,9 @@
 """Docling parser implementation.
 
 This module adapts Docling output to the ingestion parser protocol used by the
-rest of the application. The implementation is intentionally defensive:
+rest of the application. The implementation keeps the external Docling boundary
+explicit:
 
-- Docling is imported lazily so importing the package does not force heavy
-  runtime dependencies in unrelated call paths.
 - Model-cache environment variables are set explicitly so the process can reuse
   model artifacts downloaded during application startup.
 - Docling's rich document tree is normalized into deterministic `ParsedBlock`
@@ -21,15 +20,39 @@ import os
 import threading
 import warnings
 from collections import defaultdict
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Iterator, Sequence, Sized
 from contextlib import ExitStack, contextmanager, redirect_stderr
 from pathlib import Path
-from types import SimpleNamespace
-from typing import Any, Literal, cast
+from typing import Literal, Protocol, cast
 
-from verdictai.ingestion.parser.docling.docling_parser_config import (
+from docling.datamodel import vlm_model_specs
+from docling.datamodel.base_models import InputFormat
+from docling.datamodel.pipeline_options import (
+    EasyOcrOptions,
+    OcrMacOptions,
+    PdfPipelineOptions,
+    RapidOcrOptions,
+    TesseractCliOcrOptions,
+    TesseractOcrOptions,
+    VlmPipelineOptions,
+)
+from docling.document_converter import DocumentConverter, PdfFormatOption
+from docling.pipeline.vlm_pipeline import VlmPipeline
+
+from verdictai.ingestion.parser.docling.constants import (
+    DEFAULT_SECTION,
+    FIGURE_LABELS,
+    HEADING_LABELS,
+    IMAGE_SUFFIXES,
+    LIST_LABELS,
     MODEL_CACHE_ENV_VARS,
+    NOISY_DOCLING_LOGGERS,
+    OCR_OPTION_CLASS_BY_ENGINE,
     QUIET_RUNTIME_ENV_VARS,
+    TABLE_LABELS,
+    VLM_PRESET_ALIASES,
+)
+from verdictai.ingestion.parser.docling.docling_parser_config import (
     DoclingParserConfig,
 )
 from verdictai.ingestion.parser.document_parser import DocumentParserProtocol
@@ -47,30 +70,31 @@ from verdictai.ingestion.parser.types import (
     ProvenanceEntry,
 )
 from verdictai.utils import get_logger
+from verdictai.utils.errors import (
+    PARSER_DOCLING_CONVERSION_FAILED,
+    PARSER_DOCLING_EMPTY_DOCUMENT,
+    PARSER_DOCLING_NO_USABLE_BLOCKS,
+    PARSER_PROGRESS_REPORT_MISSING,
+    PARSER_RAPIDOCR_NOT_INSTALLED,
+    PARSER_SOURCE_NOT_FILE,
+    PARSER_SOURCE_NOT_FOUND,
+    PARSER_UNSUPPORTED_VLM_PRESET,
+    DoclingParserError,
+    VerdictAIFileNotFoundError,
+    VerdictAIRuntimeError,
+    VerdictAIValueError,
+)
 
 logger = get_logger(__name__)
-
-_DEFAULT_SECTION = "Document"
-_HEADING_LABELS = {"TITLE", "DOCUMENT_TITLE", "SECTION_HEADER", "HEADER"}
-_LIST_LABELS = {"LIST_ITEM", "ORDERED_LIST_ITEM", "UNORDERED_LIST_ITEM"}
-_TABLE_LABELS = {"TABLE", "TABLE_CELL"}
-_FIGURE_LABELS = {"PICTURE", "FIGURE", "IMAGE"}
-_NOISY_DOCLING_LOGGERS = (
-    "RapidOCR",
-    "rapidocr",
-    "docling",
-    "easyocr",
-    "filelock",
-    "huggingface_hub",
-    "onnxruntime",
-    "transformers",
-)
 
 ProgressCallback = Callable[[DocumentParseProgress], None]
 
 
-class DoclingParserError(RuntimeError):
-    """Raised when Docling parsing fails or returns an invalid payload."""
+class DoclingConverter(Protocol):
+    """Minimum converter contract used by the parser."""
+
+    def convert(self, source: Path) -> object:
+        """Convert a source document into a Docling conversion result."""
 
 
 class DoclingParser(DocumentParserProtocol):
@@ -242,12 +266,13 @@ class DoclingParser(DocumentParserProtocol):
             events that produced it.
 
         Raises:
-            RuntimeError: If the progress stream does not end with a final report.
+            VerdictAIRuntimeError: If the progress stream does not end with a
+                final report.
         """
 
         events = [event async for event in self.parse_with_progress(path)]
         if not events or events[-1].report is None:
-            raise RuntimeError("Docling progress stream completed without a report.")
+            raise VerdictAIRuntimeError(PARSER_PROGRESS_REPORT_MISSING)
         return events[-1].report, events
 
     def inspect_figures(self, path: str | Path) -> list[DocumentFigureInspection]:
@@ -269,15 +294,14 @@ class DoclingParser(DocumentParserProtocol):
         self._validate_source_path(source_path)
         self._configure_model_environment()
         with self._quiet_docling_runtime():
-            api = self._import_docling()
             conversion_result, _pipeline_metadata = self._convert_document(
-                api=api,
-                source_path=source_path,
+                source_path=source_path
             )
-            document = getattr(conversion_result, "document", None)
+            document = self._read_docling_attribute(conversion_result, "document")
             if document is None:
                 raise DoclingParserError(
-                    f"Docling returned no document for {source_path.name}."
+                    PARSER_DOCLING_EMPTY_DOCUMENT,
+                    source_name=source_path.name,
                 )
             ocr_engine = self._build_rapidocr_engine()
 
@@ -295,10 +319,20 @@ class DoclingParser(DocumentParserProtocol):
             if image is not None:
                 with self._quiet_docling_runtime():
                     ocr_output = ocr_engine(image)
-                if ocr_output.txts:
-                    ocr_text = " ".join(ocr_output.txts)
-                if ocr_output.scores:
-                    ocr_scores = [float(score) for score in ocr_output.scores]
+                ocr_output_texts = self._as_sequence(
+                    self._read_docling_attribute(ocr_output, "txts")
+                )
+                if ocr_output_texts:
+                    ocr_text = " ".join(str(text) for text in ocr_output_texts)
+                ocr_output_scores = self._as_sequence(
+                    self._read_docling_attribute(ocr_output, "scores")
+                )
+                if ocr_output_scores:
+                    ocr_scores = [
+                        score
+                        for value in ocr_output_scores
+                        if (score := self._coerce_float(value)) is not None
+                    ]
 
             inspections.append(
                 DocumentFigureInspection(
@@ -374,15 +408,8 @@ class DoclingParser(DocumentParserProtocol):
             },
         )
 
-        self._emit_progress(
-            progress_callback,
-            stage="importing_backend",
-            message="Importing Docling runtime.",
-            percent=25,
-        )
         with self._quiet_docling_runtime():
-            api = self._import_docling()
-            converter, pipeline_metadata = self._build_converter(api, source_path)
+            converter, pipeline_metadata = self._build_converter(source_path)
 
         self._emit_progress(
             progress_callback,
@@ -404,7 +431,9 @@ class DoclingParser(DocumentParserProtocol):
                 conversion_result = converter.convert(source_path)
         except Exception as exc:  # pragma: no cover - depends on docling runtime
             raise DoclingParserError(
-                f"Docling failed to parse {source_path.name}: {exc}"
+                PARSER_DOCLING_CONVERSION_FAILED,
+                source_name=source_path.name,
+                reason=str(exc),
             ) from exc
 
         self._emit_progress(
@@ -413,13 +442,16 @@ class DoclingParser(DocumentParserProtocol):
             message="Docling conversion finished; normalizing output.",
             percent=70,
             metadata={
-                "conversion_status": getattr(conversion_result, "status", None),
+                "conversion_status": self._coerce_json_scalar(
+                    self._read_docling_attribute(conversion_result, "status")
+                ),
             },
         )
-        document = getattr(conversion_result, "document", None)
+        document = self._read_docling_attribute(conversion_result, "document")
         if document is None:
             raise DoclingParserError(
-                f"Docling returned no document for {source_path.name}."
+                PARSER_DOCLING_EMPTY_DOCUMENT,
+                source_name=source_path.name,
             )
 
         # 4. Normalize the Docling tree into stable `ParsedBlock` records.
@@ -440,7 +472,8 @@ class DoclingParser(DocumentParserProtocol):
             )
             if fallback_block is None:
                 raise DoclingParserError(
-                    f"Docling produced no usable blocks for {source_path.name}."
+                    PARSER_DOCLING_NO_USABLE_BLOCKS,
+                    source_name=source_path.name,
                 )
             blocks = [fallback_block]
 
@@ -497,9 +530,15 @@ class DoclingParser(DocumentParserProtocol):
         """
 
         if not source_path.exists():
-            raise FileNotFoundError(f"Document does not exist: {source_path}")
+            raise VerdictAIFileNotFoundError(
+                PARSER_SOURCE_NOT_FOUND,
+                source_path=source_path,
+            )
         if not source_path.is_file():
-            raise ValueError(f"Document path is not a file: {source_path}")
+            raise VerdictAIValueError(
+                PARSER_SOURCE_NOT_FILE,
+                source_path=source_path,
+            )
 
     def _configure_model_environment(self) -> None:
         """Configure model cache environment variables.
@@ -521,61 +560,13 @@ class DoclingParser(DocumentParserProtocol):
             for env_var, value in QUIET_RUNTIME_ENV_VARS.items():
                 os.environ.setdefault(env_var, value)
 
-    def _import_docling(self) -> SimpleNamespace:
-        """Import docling lazily and expose the needed API surface.
-
-        Returns:
-            A `SimpleNamespace` containing the docling classes and constants used
-            by this parser.
-
-        Raises:
-            DoclingParserError: If docling is unavailable in the current runtime.
-        """
-
-        try:
-            from docling.datamodel import vlm_model_specs
-            from docling.datamodel.base_models import InputFormat
-            from docling.datamodel.pipeline_options import (
-                EasyOcrOptions,
-                OcrMacOptions,
-                PdfPipelineOptions,
-                RapidOcrOptions,
-                TesseractCliOcrOptions,
-                TesseractOcrOptions,
-                VlmPipelineOptions,
-            )
-            from docling.document_converter import DocumentConverter, PdfFormatOption
-            from docling.pipeline.vlm_pipeline import VlmPipeline
-        except ImportError as exc:  # pragma: no cover - depends on env
-            raise DoclingParserError(
-                "Docling is not installed in the current runtime. "
-                "Install the project dependencies before using DoclingParser."
-            ) from exc
-
-        return SimpleNamespace(
-            DocumentConverter=DocumentConverter,
-            EasyOcrOptions=EasyOcrOptions,
-            InputFormat=InputFormat,
-            OcrMacOptions=OcrMacOptions,
-            PdfFormatOption=PdfFormatOption,
-            PdfPipelineOptions=PdfPipelineOptions,
-            RapidOcrOptions=RapidOcrOptions,
-            TesseractCliOcrOptions=TesseractCliOcrOptions,
-            TesseractOcrOptions=TesseractOcrOptions,
-            VlmPipeline=VlmPipeline,
-            VlmPipelineOptions=VlmPipelineOptions,
-            vlm_model_specs=vlm_model_specs,
-        )
-
     def _build_converter(
         self,
-        api: SimpleNamespace,
         source_path: Path,
-    ) -> tuple[Any, PipelineMetadata]:
+    ) -> tuple[DoclingConverter, PipelineMetadata]:
         """Build a docling converter configured for the selected pipeline.
 
         Args:
-            api: Docling API namespace from `_import_docling()`.
             source_path: Path to the source document, used for auto pipeline selection.
 
         Returns:
@@ -584,7 +575,7 @@ class DoclingParser(DocumentParserProtocol):
               2) A JSON-serializable metadata dict describing the chosen pipeline.
         """
 
-        format_options: dict[Any, Any] = {}
+        format_options: dict[object, object] = {}
         pipeline = self._select_pipeline(source_path)
         pipeline_metadata: PipelineMetadata = {
             "pipeline": pipeline,
@@ -602,13 +593,13 @@ class DoclingParser(DocumentParserProtocol):
         }
 
         if pipeline == "standard":
-            format_options[api.InputFormat.PDF] = api.PdfFormatOption(
-                pipeline_options=self._build_standard_pipeline_options(api)
+            format_options[InputFormat.PDF] = PdfFormatOption(
+                pipeline_options=self._build_standard_pipeline_options()
             )
         else:
-            format_options[api.InputFormat.PDF] = api.PdfFormatOption(
-                pipeline_cls=api.VlmPipeline,
-                pipeline_options=self._build_vlm_pipeline_options(api),
+            format_options[InputFormat.PDF] = PdfFormatOption(
+                pipeline_cls=VlmPipeline,
+                pipeline_options=self._build_vlm_pipeline_options(),
             )
             pipeline_metadata["vlm_model"] = self.config.vlm_model
             pipeline_metadata["force_backend_text"] = self.config.force_backend_text
@@ -616,21 +607,19 @@ class DoclingParser(DocumentParserProtocol):
                 self.config.enable_remote_services
             )
 
-        converter = api.DocumentConverter(
-            format_options=format_options if format_options else None
+        converter = DocumentConverter(
+            format_options=format_options if format_options else None,
         )
         return converter, pipeline_metadata
 
     def _convert_document(
         self,
         *,
-        api: SimpleNamespace,
         source_path: Path,
-    ) -> tuple[Any, PipelineMetadata]:
+    ) -> tuple[object, PipelineMetadata]:
         """Build a converter and run one Docling conversion.
 
         Args:
-            api: Docling API namespace from `_import_docling()`.
             source_path: Resolved source document path.
 
         Returns:
@@ -638,11 +627,11 @@ class DoclingParser(DocumentParserProtocol):
             metadata used to produce it.
         """
 
-        converter, pipeline_metadata = self._build_converter(api, source_path)
+        converter, pipeline_metadata = self._build_converter(source_path)
         conversion_result = converter.convert(source_path)
         return conversion_result, pipeline_metadata
 
-    def _build_rapidocr_engine(self) -> Any:
+    def _build_rapidocr_engine(self) -> Callable[[object], object]:
         """Create a RapidOCR engine configured for the project's model cache.
 
         Returns:
@@ -655,10 +644,7 @@ class DoclingParser(DocumentParserProtocol):
         try:
             from rapidocr import RapidOCR
         except ImportError as exc:  # pragma: no cover - depends on env
-            raise DoclingParserError(
-                "RapidOCR is not installed in the current runtime. "
-                "Install the project dependencies before inspecting figures."
-            ) from exc
+            raise DoclingParserError(PARSER_RAPIDOCR_NOT_INSTALLED) from exc
 
         artifacts_root = self.config.resolve_artifact_dir()
         rapidocr_model_root = None
@@ -686,17 +672,14 @@ class DoclingParser(DocumentParserProtocol):
 
         return RapidOCR(params=ocr_params or None)
 
-    def _build_standard_pipeline_options(self, api: SimpleNamespace) -> Any:
+    def _build_standard_pipeline_options(self) -> PdfPipelineOptions:
         """Create Docling `PdfPipelineOptions` for the standard pipeline.
-
-        Args:
-            api: Docling API namespace from `_import_docling()`.
 
         Returns:
             A Docling `PdfPipelineOptions` instance.
         """
 
-        kwargs: dict[str, Any] = {
+        kwargs: dict[str, object] = {
             "do_ocr": self.config.do_ocr,
             "do_table_structure": self.config.do_table_structure,
             "generate_picture_images": self.config.generate_picture_images,
@@ -704,16 +687,13 @@ class DoclingParser(DocumentParserProtocol):
         artifacts_dir = self.config.resolve_artifact_dir()
         if artifacts_dir is not None:
             kwargs["artifacts_path"] = str(artifacts_dir)
-        ocr_options = self._build_ocr_options(api)
+        ocr_options = self._build_ocr_options()
         if ocr_options is not None:
             kwargs["ocr_options"] = ocr_options
-        return api.PdfPipelineOptions(**kwargs)
+        return PdfPipelineOptions(**kwargs)
 
-    def _build_vlm_pipeline_options(self, api: SimpleNamespace) -> Any:
+    def _build_vlm_pipeline_options(self) -> VlmPipelineOptions:
         """Create Docling `VlmPipelineOptions` for the VLM pipeline.
-
-        Args:
-            api: Docling API namespace from `_import_docling()`.
 
         Returns:
             A Docling `VlmPipelineOptions` instance.
@@ -724,13 +704,14 @@ class DoclingParser(DocumentParserProtocol):
 
         preset_name = self._resolve_vlm_preset_name(self.config.vlm_model)
         try:
-            vlm_options = getattr(api.vlm_model_specs, preset_name)
+            vlm_options = self._read_docling_attribute(vlm_model_specs, preset_name)
         except AttributeError as exc:
             raise DoclingParserError(
-                f"Unsupported Docling VLM preset '{self.config.vlm_model}'."
+                PARSER_UNSUPPORTED_VLM_PRESET,
+                preset_name=self.config.vlm_model,
             ) from exc
 
-        return api.VlmPipelineOptions(
+        return VlmPipelineOptions(
             vlm_options=vlm_options,
             force_backend_text=self.config.force_backend_text,
             generate_page_images=self.config.generate_page_images,
@@ -738,11 +719,8 @@ class DoclingParser(DocumentParserProtocol):
             enable_remote_services=self.config.enable_remote_services,
         )
 
-    def _build_ocr_options(self, api: SimpleNamespace) -> Any | None:
+    def _build_ocr_options(self) -> object | None:
         """Instantiate the configured OCR backend options.
-
-        Args:
-            api: Docling API namespace from `_import_docling()`.
 
         Returns:
             OCR options instance understood by Docling, or None when OCR is disabled.
@@ -751,16 +729,15 @@ class DoclingParser(DocumentParserProtocol):
         if not self.config.do_ocr:
             return None
 
-        option_class_name = {
-            "easyocr": "EasyOcrOptions",
-            "rapidocr": "RapidOcrOptions",
-            "tesseract": "TesseractOcrOptions",
-            "tesseract_cli": "TesseractCliOcrOptions",
-            "ocrmac": "OcrMacOptions",
-        }[self.config.ocr_engine]
-
-        option_class = getattr(api, option_class_name)
-        return option_class()
+        option_classes = {
+            "EasyOcrOptions": EasyOcrOptions,
+            "RapidOcrOptions": RapidOcrOptions,
+            "TesseractOcrOptions": TesseractOcrOptions,
+            "TesseractCliOcrOptions": TesseractCliOcrOptions,
+            "OcrMacOptions": OcrMacOptions,
+        }
+        option_class_name = OCR_OPTION_CLASS_BY_ENGINE[self.config.ocr_engine]
+        return option_classes[option_class_name]()
 
     def _select_pipeline(self, source_path: Path) -> Literal["standard", "vlm"]:
         """Choose the Docling pipeline for the current source file.
@@ -777,13 +754,12 @@ class DoclingParser(DocumentParserProtocol):
         if self.config.pipeline == "vlm":
             return "vlm"
 
-        image_suffixes = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp"}
-        return "vlm" if source_path.suffix.lower() in image_suffixes else "standard"
+        return "vlm" if source_path.suffix.lower() in IMAGE_SUFFIXES else "standard"
 
     def _build_blocks(
         self,
         *,
-        document: Any,
+        document: object,
         source_path: Path,
     ) -> list[ParsedBlock]:
         """Normalize Docling items into canonical ingestion blocks.
@@ -832,7 +808,7 @@ class DoclingParser(DocumentParserProtocol):
                 section = heading_text
                 parent_section_path = heading_stack[:-1]
             else:
-                section = heading_stack[-1] if heading_stack else _DEFAULT_SECTION
+                section = heading_stack[-1] if heading_stack else DEFAULT_SECTION
                 parent_section_path = list(heading_stack)
 
             # 4. Construct a deterministic block id suitable for storage and joins.
@@ -883,7 +859,7 @@ class DoclingParser(DocumentParserProtocol):
     def _build_fallback_block(
         self,
         *,
-        document: Any,
+        document: object,
         source_path: Path,
     ) -> ParsedBlock | None:
         """Create a single whole-document block when item iteration yields nothing.
@@ -921,10 +897,10 @@ class DoclingParser(DocumentParserProtocol):
                 order_in_page=0,
                 block_type="document",
                 text=content,
-                section=_DEFAULT_SECTION,
+                section=DEFAULT_SECTION,
             ),
             page=1,
-            section=_DEFAULT_SECTION,
+            section=DEFAULT_SECTION,
             block_type="document",
             text=content,
             markdown=markdown,
@@ -937,11 +913,11 @@ class DoclingParser(DocumentParserProtocol):
     def _build_result_metadata(
         self,
         *,
-        document: Any,
+        document: object,
         source_path: Path,
         blocks: list[ParsedBlock],
         pipeline_metadata: PipelineMetadata,
-        conversion_result: Any,
+        conversion_result: object,
     ) -> dict[str, JsonValue]:
         """Assemble top-level parse metadata for observability and debugging.
 
@@ -973,24 +949,65 @@ class DoclingParser(DocumentParserProtocol):
             "table_count": tables,
             "figure_count": figures,
             "pipeline": cast(JsonValue, pipeline_metadata),
-            "conversion_status": getattr(conversion_result, "status", None),
+            "conversion_status": self._coerce_json_scalar(
+                self._read_docling_attribute(conversion_result, "status")
+            ),
             "warnings": cast(
                 JsonValue,
-                self._coerce_to_string_list(getattr(conversion_result, "warnings", None)),
+                self._coerce_to_string_list(
+                    self._read_docling_attribute(conversion_result, "warnings")
+                ),
             ),
             "errors": cast(
                 JsonValue,
-                self._coerce_to_string_list(getattr(conversion_result, "errors", None)),
+                self._coerce_to_string_list(
+                    self._read_docling_attribute(conversion_result, "errors")
+                ),
             ),
         }
 
-        document_name = getattr(document, "name", None)
-        if document_name:
+        document_name = self._read_docling_attribute(document, "name")
+        if isinstance(document_name, str) and document_name:
             metadata["docling_document_name"] = document_name
+
+        if self.config.include_docling_document:
+            docling_document = self._export_document_payload(document)
+            if docling_document is not None:
+                metadata["docling_document"] = cast(JsonValue, docling_document)
 
         return metadata
 
-    def _iterate_items(self, document: Any) -> list[tuple[Any, int]]:
+    def _export_document_payload(self, document: object) -> dict[str, object] | None:
+        """Serialize the Docling document into a JSON-safe payload.
+
+        Args:
+            document: Docling document object returned by the converter.
+
+        Returns:
+            Exported document payload when serialization is supported, otherwise None.
+
+        Notes:
+            The serialized payload allows downstream chunkers to resume from the
+            parser output without reparsing the original source file.
+        """
+
+        export_method = self._read_docling_attribute(document, "export_to_dict")
+        if not callable(export_method):
+            return None
+
+        try:
+            exported = export_method()
+        except Exception:  # pragma: no cover - depends on docling runtime
+            self._logger.debug(
+                "Docling document export_to_dict failed for %s",
+                type(document).__name__,
+                exc_info=True,
+            )
+            return None
+
+        return exported if isinstance(exported, dict) else None
+
+    def _iterate_items(self, document: object) -> list[tuple[object, int]]:
         """Return Docling items in reading order.
 
         Args:
@@ -1001,7 +1018,7 @@ class DoclingParser(DocumentParserProtocol):
             Returns an empty list if the document does not expose an iterator.
         """
 
-        iterator = getattr(document, "iterate_items", None)
+        iterator = self._read_docling_attribute(document, "iterate_items")
         if not callable(iterator):
             return []
 
@@ -1010,7 +1027,7 @@ class DoclingParser(DocumentParserProtocol):
         except TypeError:
             items = list(iterator(document))
 
-        normalized: list[tuple[Any, int]] = []
+        normalized: list[tuple[object, int]] = []
         for entry in items:
             if (
                 isinstance(entry, tuple)
@@ -1020,7 +1037,7 @@ class DoclingParser(DocumentParserProtocol):
                 normalized.append((entry[0], entry[1]))
         return normalized
 
-    def _extract_text(self, *, item: Any, document: Any) -> str:
+    def _extract_text(self, *, item: object, document: object) -> str:
         """Extract the best plain-text representation of a Docling item.
 
         Args:
@@ -1032,7 +1049,7 @@ class DoclingParser(DocumentParserProtocol):
         """
 
         for attribute in ("text", "orig"):
-            value = getattr(item, attribute, None)
+            value = self._read_docling_attribute(item, attribute)
             if isinstance(value, str) and value.strip():
                 return value.strip()
 
@@ -1051,7 +1068,7 @@ class DoclingParser(DocumentParserProtocol):
 
         return ""
 
-    def _extract_markdown(self, *, item: Any, document: Any) -> str | None:
+    def _extract_markdown(self, *, item: object, document: object) -> str | None:
         """Extract a markdown representation for a Docling item.
 
         Args:
@@ -1070,7 +1087,7 @@ class DoclingParser(DocumentParserProtocol):
             return normalized or None
         return None
 
-    def _extract_provenance(self, item: Any) -> ExtractedProvenance:
+    def _extract_provenance(self, item: object) -> ExtractedProvenance:
         """Extract page/bbox/confidence data from Docling provenance.
 
         Args:
@@ -1080,20 +1097,20 @@ class DoclingParser(DocumentParserProtocol):
             Structured provenance fields derived from Docling metadata.
         """
 
-        prov_entries = getattr(item, "prov", None) or []
+        prov_entries = self._as_sequence(self._read_docling_attribute(item, "prov"))
         normalized_provenance: list[ProvenanceEntry] = []
         page_number: int | None = None
         bbox: tuple[float, float, float, float] | None = None
         confidence_values: list[float] = []
         is_ocr = False
 
-        for prov in prov_entries:
+        for prov in prov_entries or ():
             # 1. Pull out best-effort fields from Docling provenance objects.
-            page_no = getattr(prov, "page_no", None)
-            bbox_value = getattr(prov, "bbox", None)
-            charspan = getattr(prov, "charspan", None)
-            confidence = getattr(prov, "confidence", None)
-            source = getattr(prov, "source", None)
+            page_no = self._read_docling_attribute(prov, "page_no")
+            bbox_value = self._read_docling_attribute(prov, "bbox")
+            charspan = self._read_docling_attribute(prov, "charspan")
+            confidence = self._read_docling_attribute(prov, "confidence")
+            source = self._read_docling_attribute(prov, "source")
 
             if page_number is None and isinstance(page_no, int) and page_no > 0:
                 page_number = page_no
@@ -1110,7 +1127,7 @@ class DoclingParser(DocumentParserProtocol):
 
             normalized_provenance.append(
                 {
-                    "page_no": page_no,
+                    "page_no": page_no if isinstance(page_no, int) else None,
                     "bbox": list(bbox) if bbox else None,
                     "charspan": self._coerce_charspan(charspan),
                     "confidence": float(confidence)
@@ -1137,13 +1154,13 @@ class DoclingParser(DocumentParserProtocol):
     def _normalize_block_type(self, *, label: str | None) -> str:
         """Map Docling item labels onto canonical ingestion block types."""
 
-        if label in _HEADING_LABELS:
+        if label in HEADING_LABELS:
             return "heading"
-        if label in _LIST_LABELS:
+        if label in LIST_LABELS:
             return "list_item"
-        if label in _TABLE_LABELS:
+        if label in TABLE_LABELS:
             return "table"
-        if label in _FIGURE_LABELS:
+        if label in FIGURE_LABELS:
             return "figure"
         if label == "CODE":
             return "code"
@@ -1153,13 +1170,13 @@ class DoclingParser(DocumentParserProtocol):
             return "caption"
         return "paragraph"
 
-    def _extract_label(self, item: Any) -> str | None:
+    def _extract_label(self, item: object) -> str | None:
         """Return the Docling item label name when present."""
 
-        label = getattr(item, "label", None)
+        label = self._read_docling_attribute(item, "label")
         if label is None:
             return None
-        name = getattr(label, "name", None)
+        name = self._read_docling_attribute(label, "name")
         if isinstance(name, str):
             return name
         if isinstance(label, str):
@@ -1175,7 +1192,7 @@ class DoclingParser(DocumentParserProtocol):
     ) -> int | None:
         """Compute a normalized heading depth in the supported 1..6 range."""
 
-        if block_type != "heading" and label not in _HEADING_LABELS:
+        if block_type != "heading" and label not in HEADING_LABELS:
             return None
         return max(1, min(level or 1, 6))
 
@@ -1195,10 +1212,12 @@ class DoclingParser(DocumentParserProtocol):
         # 2. Backfill missing ancestors so `heading_stack` depth always matches
         #    `heading_level - 1` before appending the current heading.
         while len(heading_stack) < heading_level - 1:
-            heading_stack.append(_DEFAULT_SECTION)
+            heading_stack.append(DEFAULT_SECTION)
         heading_stack.append(clean_heading)
 
-    def _extract_page_count(self, *, document: Any, blocks: list[ParsedBlock]) -> int:
+    def _extract_page_count(
+        self, *, document: object, blocks: list[ParsedBlock]
+    ) -> int:
         """Determine total page count from the Docling document or emitted blocks.
 
         Args:
@@ -1209,8 +1228,8 @@ class DoclingParser(DocumentParserProtocol):
             Total page count (0 when unknown).
         """
 
-        pages = getattr(document, "pages", None)
-        if pages is not None:
+        pages = self._read_docling_attribute(document, "pages")
+        if isinstance(pages, Sized):
             try:
                 return len(pages)
             except TypeError:
@@ -1231,13 +1250,7 @@ class DoclingParser(DocumentParserProtocol):
         """
 
         normalized = value.strip().upper()
-        alias_map = {
-            "GRANITE_DOCLING": "GRANITEDOCLING_TRANSFORMERS",
-            "GRANITEDOCLING": "GRANITEDOCLING_TRANSFORMERS",
-            "SMOLDOCLING": "SMOLDOCLING_TRANSFORMERS",
-            "SMOL_DOCLING": "SMOLDOCLING_TRANSFORMERS",
-        }
-        return alias_map.get(normalized, normalized)
+        return VLM_PRESET_ALIASES.get(normalized, normalized)
 
     def _document_id(self, source_path: Path) -> str:
         """Build a stable document identifier.
@@ -1294,7 +1307,7 @@ class DoclingParser(DocumentParserProtocol):
 
     def _normalize_bbox(
         self,
-        bbox: Any,
+        bbox: object,
     ) -> tuple[float, float, float, float] | None:
         """Normalize various Docling bbox shapes into a fixed 4-tuple.
 
@@ -1310,30 +1323,30 @@ class DoclingParser(DocumentParserProtocol):
             return None
 
         if isinstance(bbox, (tuple, list)) and len(bbox) == 4:
-            try:
-                left, top, right, bottom = (float(value) for value in bbox)
-                return (left, top, right, bottom)
-            except (TypeError, ValueError):
+            raw_coordinates = [self._coerce_float(value) for value in bbox]
+            if any(value is None for value in raw_coordinates):
                 return None
+            left, top, right, bottom = [
+                value for value in raw_coordinates if value is not None
+            ]
+            return (left, top, right, bottom)
 
-        coordinates: list[Any] = []
+        bbox_coordinates: list[float] = []
         for attribute in ("l", "t", "r", "b"):
-            value = getattr(bbox, attribute, None)
-            if value is None:
-                coordinates = []
+            value = self._read_docling_attribute(bbox, attribute)
+            coordinate = self._coerce_float(value)
+            if coordinate is None:
+                bbox_coordinates = []
                 break
-            coordinates.append(value)
+            bbox_coordinates.append(coordinate)
 
-        if len(coordinates) == 4:
-            try:
-                left, top, right, bottom = (float(value) for value in coordinates)
-                return (left, top, right, bottom)
-            except (TypeError, ValueError):
-                return None
+        if len(bbox_coordinates) == 4:
+            left, top, right, bottom = bbox_coordinates
+            return (left, top, right, bottom)
 
         return None
 
-    def _stringify_source(self, value: Any) -> str | None:
+    def _stringify_source(self, value: object) -> str | None:
         """Convert a provenance source enum or object to a readable string.
 
         Args:
@@ -1345,13 +1358,13 @@ class DoclingParser(DocumentParserProtocol):
 
         if value is None:
             return None
-        name = getattr(value, "name", None)
+        name = self._read_docling_attribute(value, "name")
         if isinstance(name, str):
             return name
         value_as_str = str(value)
         return value_as_str if value_as_str else None
 
-    def _coerce_charspan(self, value: Any) -> list[int] | None:
+    def _coerce_charspan(self, value: object) -> list[int] | None:
         """Normalize character-span metadata when present.
 
         Args:
@@ -1368,7 +1381,7 @@ class DoclingParser(DocumentParserProtocol):
                 return None
         return None
 
-    def _coerce_to_string_list(self, value: Any) -> list[str]:
+    def _coerce_to_string_list(self, value: object) -> list[str]:
         """Normalize Docling warning/error collections to strings.
 
         Args:
@@ -1396,7 +1409,9 @@ class DoclingParser(DocumentParserProtocol):
 
         return str(value) if value is not None else None
 
-    def _safe_call(self, target: Any, method_name: str, *args: Any) -> Any | None:
+    def _safe_call(
+        self, target: object, method_name: str, *args: object
+    ) -> object | None:
         """Invoke a Docling method defensively.
 
         Args:
@@ -1408,7 +1423,7 @@ class DoclingParser(DocumentParserProtocol):
             Method result on success, otherwise None.
         """
 
-        method = getattr(target, method_name, None)
+        method = self._read_docling_attribute(target, method_name)
         if not callable(method):
             return None
 
@@ -1421,6 +1436,49 @@ class DoclingParser(DocumentParserProtocol):
                 type(target).__name__,
                 exc_info=True,
             )
+            return None
+
+    def _as_sequence(self, value: object | None) -> Sequence[object] | None:
+        """Return `value` as a non-string sequence when possible."""
+
+        if isinstance(value, Sequence) and not isinstance(value, str | bytes):
+            return value
+        return None
+
+    def _coerce_float(self, value: object | None) -> float | None:
+        """Convert a Docling numeric payload to float when possible."""
+
+        if value is None:
+            return None
+        if isinstance(value, str | int | float):
+            return float(value)
+        try:
+            return float(cast(str, value))
+        except (TypeError, ValueError):
+            return None
+
+    def _coerce_json_scalar(self, value: object | None) -> JsonValue:
+        """Keep scalar metadata JSON-safe without widening to arbitrary objects."""
+
+        if isinstance(value, str | int | float | bool) or value is None:
+            return value
+        return str(value)
+
+    def _read_docling_attribute(
+        self, source: object | None, name: str
+    ) -> object | None:
+        """Read an optional attribute from a Docling-owned runtime object.
+
+        Docling exposes Pydantic/dataclass-like objects whose optional fields vary
+        by item type and pipeline. Centralizing the dynamic access keeps the rest
+        of the parser code explicit and makes the boundary easy to audit.
+        """
+
+        if source is None:
+            return None
+        try:
+            return object.__getattribute__(source, name)
+        except AttributeError:
             return None
 
     def _emit_progress(
@@ -1458,7 +1516,7 @@ class DoclingParser(DocumentParserProtocol):
         )
 
     @contextmanager
-    def _suppress_docling_logs(self) -> Any:
+    def _suppress_docling_logs(self) -> Iterator[None]:
         """Temporarily raise third-party Docling logger levels to `ERROR`.
 
         Yields:
@@ -1469,7 +1527,7 @@ class DoclingParser(DocumentParserProtocol):
             `verdictai` application logs remain unchanged.
         """
 
-        loggers = [logging.getLogger(name) for name in _NOISY_DOCLING_LOGGERS]
+        loggers = [logging.getLogger(name) for name in NOISY_DOCLING_LOGGERS]
         previous_levels = {logger.name: logger.level for logger in loggers}
         previous_disabled = {logger.name: logger.disabled for logger in loggers}
 
@@ -1484,7 +1542,7 @@ class DoclingParser(DocumentParserProtocol):
                 noisy_logger.setLevel(previous_levels[noisy_logger.name])
 
     @contextmanager
-    def _temporary_environment(self, values: dict[str, str]) -> Any:
+    def _temporary_environment(self, values: dict[str, str]) -> Iterator[None]:
         """Temporarily set environment variables for a noisy runtime section.
 
         Args:
@@ -1507,7 +1565,7 @@ class DoclingParser(DocumentParserProtocol):
                     os.environ[key] = previous_value
 
     @contextmanager
-    def _quiet_docling_runtime(self) -> Any:
+    def _quiet_docling_runtime(self) -> Iterator[None]:
         """Suppress third-party logs, warnings, and progress UI around Docling.
 
         Yields:

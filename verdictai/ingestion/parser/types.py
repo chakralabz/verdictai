@@ -1,8 +1,7 @@
 """Shared parser-facing type contracts.
 
 This module centralizes small reusable contracts so parser implementations and
-Pydantic schemas can share the same typed shapes instead of repeating
-`dict[str, Any]` throughout the package.
+Pydantic schemas can share explicit JSON-safe shapes throughout the package.
 """
 
 from __future__ import annotations
@@ -11,10 +10,8 @@ from dataclasses import dataclass
 from typing import Literal, TypeAlias, TypedDict
 
 JsonPrimitive: TypeAlias = str | int | float | bool | None
-JsonPrimitiveList: TypeAlias = list[JsonPrimitive]
-JsonObjectValue: TypeAlias = JsonPrimitive | JsonPrimitiveList
-JsonObject: TypeAlias = dict[str, JsonObjectValue]
-JsonValue: TypeAlias = JsonObjectValue | JsonObject | list[JsonObject]
+JsonValue: TypeAlias = JsonPrimitive | list[object] | dict[str, object]
+JsonObject: TypeAlias = dict[str, JsonValue]
 
 ProgressStage = Literal[
     "validating_input",
@@ -27,6 +24,7 @@ ProgressStage = Literal[
     "building_metadata",
     "completed",
 ]
+
 
 class ProvenanceEntry(TypedDict):
     """Normalized Docling provenance payload for one source fragment."""
