@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from docling_core.transforms.chunker.hybrid_chunker import HybridChunker
 
-from verdictai.ingestion.chunker.docling.options import DOCLING_HYBRID_CHUNKER_NAME
 from verdictai.ingestion.chunker.docling.base_docling_chunker import BaseDoclingChunker
+from verdictai.ingestion.chunker.docling.options import DOCLING_HYBRID_CHUNKER_NAME
 from verdictai.ingestion.chunker.docling.runtime.interfaces import (
     DoclingChunkerProtocol,
 )
@@ -26,16 +26,21 @@ class DoclingHybridChunker(BaseDoclingChunker):
     def _create_docling_chunker(self) -> DoclingChunkerProtocol:
         """Create a configured Docling `HybridChunker`."""
 
-        chunker_kwargs: dict[str, object] = {
-            "tokenizer": build_docling_tokenizer(config=self.config.tokenizer),
-            "merge_peers": self.config.merge_peers,
-            "repeat_table_header": self.config.repeat_table_header,
-            "omit_header_on_overflow": self.config.omit_header_on_overflow,
-        }
         serializer_provider = build_serializer_provider(config=self.config.serializer)
         if serializer_provider is not None:
-            chunker_kwargs["serializer_provider"] = serializer_provider
-        return HybridChunker(**chunker_kwargs)
+            return HybridChunker(
+                tokenizer=build_docling_tokenizer(config=self.config.tokenizer),
+                merge_peers=self.config.merge_peers,
+                repeat_table_header=self.config.repeat_table_header,
+                omit_header_on_overflow=self.config.omit_header_on_overflow,
+                serializer_provider=serializer_provider,
+            )
+        return HybridChunker(
+            tokenizer=build_docling_tokenizer(config=self.config.tokenizer),
+            merge_peers=self.config.merge_peers,
+            repeat_table_header=self.config.repeat_table_header,
+            omit_header_on_overflow=self.config.omit_header_on_overflow,
+        )
 
     def _build_result_metadata(self) -> dict[str, JsonValue]:
         """Return metadata specific to hybrid chunking."""

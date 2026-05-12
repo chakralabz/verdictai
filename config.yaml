@@ -1,0 +1,71 @@
+# VerdictAI application configuration.
+#
+# Values may reference environment variables with ${VAR_NAME} or
+# ${VAR_NAME:-fallback}. Keep secrets in .env or the deployment environment.
+
+parser:
+  docling:
+    pipeline: auto
+    do_ocr: true
+    do_table_structure: true
+    ocr_engine: rapidocr
+    vlm_model: granite_docling
+    force_backend_text: true
+    generate_page_images: false
+    generate_picture_images: false
+    enable_remote_services: false
+    suppress_external_logs: true
+    suppress_progress_bars: true
+    suppress_runtime_warnings: true
+    include_docling_document: true
+    stream_page_progress: false
+    model_cache_dir: ${HF_HOME:-./models/hf-cache}
+    artifact_dir: ${DOCLING_ARTIFACTS_PATH:-./models/docling}
+
+chunker:
+  docling:
+    tokenizer:
+      provider: huggingface
+      model_name: sentence-transformers/all-MiniLM-L6-v2
+      max_tokens: 512
+    serializer:
+      table_mode: default
+      compact_tables: false
+      image_placeholder:
+    merge_peers: true
+    repeat_table_header: true
+    omit_header_on_overflow: false
+    prefix: ""
+    omit_prefix_on_overflow: false
+    merge_list_items: true
+
+embeddings:
+  backend: sentence_transformers
+  model_name: sentence-transformers/all-MiniLM-L6-v2
+  model_path:
+  model_cache_dir: ${HF_HOME:-./models/hf-cache}
+  normalize_embeddings: true
+  batch_size: 64
+  max_concurrency: 4
+  request_timeout_seconds: 60.0
+  api_key: ${HF_TOKEN:-}
+  endpoint_url: https://api.openai.com/v1/embeddings
+  organization:
+  dimensions:
+
+store:
+  backend: qdrant
+  qdrant:
+    url: ${QDRANT_URL:-http://localhost:6333}
+    api_key: ${QDRANT_API_KEY:-}
+    collection_name: ${QDRANT_COLLECTION_NAME:-verdictai_chunks}
+    dense_vector_name: dense
+    sparse_vector_name: bm25
+    sparse_model_name: Qdrant/bm25
+    distance: cosine
+    prefer_grpc: false
+    timeout_seconds: 30.0
+    batch_size: 64
+    dense_on_disk: false
+    sparse_on_disk: false
+    sparse_modifier: idf

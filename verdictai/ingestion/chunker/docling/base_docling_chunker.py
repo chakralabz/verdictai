@@ -6,9 +6,6 @@ import asyncio
 from abc import ABC, abstractmethod
 
 from verdictai.ingestion.chunker.docling.options import DoclingChunkerConfig
-from verdictai.ingestion.chunker.docling.runtime.restore_docling_document import (
-    restore_docling_document,
-)
 from verdictai.ingestion.chunker.docling.runtime.interfaces import (
     DoclingChunkerProtocol,
     DoclingChunkProtocol,
@@ -16,6 +13,9 @@ from verdictai.ingestion.chunker.docling.runtime.interfaces import (
 )
 from verdictai.ingestion.chunker.docling.runtime.normalize_docling_chunks import (
     normalize_docling_chunks,
+)
+from verdictai.ingestion.chunker.docling.runtime.restore_docling_document import (
+    restore_docling_document,
 )
 from verdictai.ingestion.chunker.document_chunker import DocumentChunkerProtocol
 from verdictai.ingestion.chunker.schemas import ChunkingResult
@@ -35,7 +35,12 @@ class BaseDoclingChunker(DocumentChunkerProtocol, ABC):
             config: Chunker configuration. When omitted, defaults are used.
         """
 
-        self.config = config or DoclingChunkerConfig()
+        if config is None:
+            from verdictai.config import get_settings
+
+            self.config = get_settings().chunker.docling
+        else:
+            self.config = config
 
     def chunk(self, parse_result: DocumentParseResult) -> ChunkingResult:
         """Chunk parser output into retrieval-ready VerdictAI chunks."""
