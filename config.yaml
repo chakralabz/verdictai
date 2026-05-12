@@ -48,7 +48,8 @@ embeddings:
   batch_size: 64
   max_concurrency: 4
   request_timeout_seconds: 60.0
-  api_key: ${HF_TOKEN:-}
+  max_retries: 2
+  api_key: ${OPENAI_API_KEY:-}
   endpoint_url: https://api.openai.com/v1/embeddings
   organization:
   dimensions:
