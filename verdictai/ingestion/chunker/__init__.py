@@ -2,17 +2,19 @@
 
 from __future__ import annotations
 
-from .api import chunk_document, chunk_document_async, create_chunker
+
 from .docling import (
     DoclingChunkerConfig,
-    DoclingHierarchicalChunker,
-    DoclingHybridChunker,
-    DoclingLineBasedChunker,
     DoclingSerializerConfig,
     DoclingTokenizerConfig,
 )
 from .document_chunker import DocumentChunkerProtocol
 from .schemas import Chunk, ChunkingResult
+from .docling import (
+    DoclingHierarchicalChunker,
+    DoclingHybridChunker,
+    DoclingLineBasedChunker,
+)
 
 __all__ = [
     "Chunk",
@@ -24,7 +26,18 @@ __all__ = [
     "DoclingSerializerConfig",
     "DoclingTokenizerConfig",
     "DocumentChunkerProtocol",
-    "chunk_document",
-    "chunk_document_async",
-    "create_chunker",
 ]
+
+
+def __getattr__(name: str) -> object:
+    """Import concrete Docling chunkers only when requested."""
+
+    if name in {
+        "DoclingHierarchicalChunker",
+        "DoclingHybridChunker",
+        "DoclingLineBasedChunker",
+    }:
+        from . import docling
+
+        return getattr(docling, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
