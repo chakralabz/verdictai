@@ -30,13 +30,16 @@ from docling.datamodel.base_models import InputFormat
 from docling.datamodel.pipeline_options import (
     EasyOcrOptions,
     OcrMacOptions,
+    OcrOptions,
     PdfPipelineOptions,
     RapidOcrOptions,
     TesseractCliOcrOptions,
     TesseractOcrOptions,
+    VlmConvertOptions,
     VlmPipelineOptions,
 )
-from docling.document_converter import DocumentConverter, PdfFormatOption
+from docling.datamodel.pipeline_options_vlm_model import ApiVlmOptions, InlineVlmOptions
+from docling.document_converter import DocumentConverter, FormatOption, PdfFormatOption
 from docling.pipeline.vlm_pipeline import VlmPipeline
 
 from verdictai.ingestion.parser.docling.constants import (
@@ -118,7 +121,12 @@ class DoclingParser(DocumentParserProtocol):
             config: Parser configuration. When omitted, defaults are used.
             log: Optional logger. When omitted, uses the module logger.
         """
-        self.config = config or DoclingParserConfig()
+        if config is None:
+            from verdictai.config import get_settings
+
+            self.config = get_settings().parser.docling
+        else:
+            self.config = config
         self._logger = log or logger
 
     def parse_document(self, path: str | Path) -> list[ParsedBlock]:
@@ -575,7 +583,7 @@ class DoclingParser(DocumentParserProtocol):
               2) A JSON-serializable metadata dict describing the chosen pipeline.
         """
 
-        format_options: dict[object, object] = {}
+        format_options: dict[InputFormat, FormatOption] = {}
         pipeline = self._select_pipeline(source_path)
         pipeline_metadata: PipelineMetadata = {
             "pipeline": pipeline,
@@ -679,18 +687,35 @@ class DoclingParser(DocumentParserProtocol):
             A Docling `PdfPipelineOptions` instance.
         """
 
-        kwargs: dict[str, object] = {
-            "do_ocr": self.config.do_ocr,
-            "do_table_structure": self.config.do_table_structure,
-            "generate_picture_images": self.config.generate_picture_images,
-        }
         artifacts_dir = self.config.resolve_artifact_dir()
-        if artifacts_dir is not None:
-            kwargs["artifacts_path"] = str(artifacts_dir)
         ocr_options = self._build_ocr_options()
+        if artifacts_dir is not None and ocr_options is not None:
+            return PdfPipelineOptions(
+                do_ocr=self.config.do_ocr,
+                do_table_structure=self.config.do_table_structure,
+                generate_picture_images=self.config.generate_picture_images,
+                artifacts_path=str(artifacts_dir),
+                ocr_options=ocr_options,
+            )
+        if artifacts_dir is not None:
+            return PdfPipelineOptions(
+                do_ocr=self.config.do_ocr,
+                do_table_structure=self.config.do_table_structure,
+                generate_picture_images=self.config.generate_picture_images,
+                artifacts_path=str(artifacts_dir),
+            )
         if ocr_options is not None:
-            kwargs["ocr_options"] = ocr_options
-        return PdfPipelineOptions(**kwargs)
+            return PdfPipelineOptions(
+                do_ocr=self.config.do_ocr,
+                do_table_structure=self.config.do_table_structure,
+                generate_picture_images=self.config.generate_picture_images,
+                ocr_options=ocr_options,
+            )
+        return PdfPipelineOptions(
+            do_ocr=self.config.do_ocr,
+            do_table_structure=self.config.do_table_structure,
+            generate_picture_images=self.config.generate_picture_images,
+        )
 
     def _build_vlm_pipeline_options(self) -> VlmPipelineOptions:
         """Create Docling `VlmPipelineOptions` for the VLM pipeline.
@@ -710,6 +735,14 @@ class DoclingParser(DocumentParserProtocol):
                 PARSER_UNSUPPORTED_VLM_PRESET,
                 preset_name=self.config.vlm_model,
             ) from exc
+        if not isinstance(
+            vlm_options,
+            VlmConvertOptions | InlineVlmOptions | ApiVlmOptions,
+        ):
+            raise DoclingParserError(
+                PARSER_UNSUPPORTED_VLM_PRESET,
+                preset_name=self.config.vlm_model,
+            )
 
         return VlmPipelineOptions(
             vlm_options=vlm_options,
@@ -719,7 +752,7 @@ class DoclingParser(DocumentParserProtocol):
             enable_remote_services=self.config.enable_remote_services,
         )
 
-    def _build_ocr_options(self) -> object | None:
+    def _build_ocr_options(self) -> OcrOptions | None:
         """Instantiate the configured OCR backend options.
 
         Returns:

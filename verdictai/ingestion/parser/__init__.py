@@ -2,13 +2,9 @@
 
 from __future__ import annotations
 
-from .api import (
-    collect_document_progress,
-    create_parser,
-    parse_document,
-    parse_document_async,
-)
-from .docling import DoclingParser, DoclingParserConfig
+from typing import TYPE_CHECKING
+
+from .docling import DoclingParserConfig
 from .document_parser import DocumentParserProtocol
 from .schemas import (
     DocumentFigureInspection,
@@ -16,6 +12,9 @@ from .schemas import (
     DocumentParseResult,
     ParsedBlock,
 )
+
+if TYPE_CHECKING:
+    from .docling import DoclingParser
 
 __all__ = [
     "DoclingParser",
@@ -25,8 +24,14 @@ __all__ = [
     "DocumentParseResult",
     "DocumentParserProtocol",
     "ParsedBlock",
-    "collect_document_progress",
-    "create_parser",
-    "parse_document",
-    "parse_document_async",
 ]
+
+
+def __getattr__(name: str) -> object:
+    """Import concrete Docling parser only when requested."""
+
+    if name == "DoclingParser":
+        from .docling import DoclingParser
+
+        return DoclingParser
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
