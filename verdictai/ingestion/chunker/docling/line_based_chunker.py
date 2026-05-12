@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+from docling_core.transforms.chunker.hierarchical_chunker import (
+    ChunkingSerializerProvider,
+)
 from docling_core.transforms.chunker.line_chunker import LineBasedTokenChunker
 
+from verdictai.ingestion.chunker.docling.base_docling_chunker import BaseDoclingChunker
 from verdictai.ingestion.chunker.docling.options import (
     DOCLING_LINE_BASED_CHUNKER_NAME,
 )
-from verdictai.ingestion.chunker.docling.base_docling_chunker import BaseDoclingChunker
 from verdictai.ingestion.chunker.docling.runtime.interfaces import (
     DoclingChunkerProtocol,
 )
@@ -29,6 +32,7 @@ class DoclingLineBasedChunker(BaseDoclingChunker):
             tokenizer=build_docling_tokenizer(config=self.config.tokenizer),
             prefix=self.config.prefix,
             omit_prefix_on_overflow=self.config.omit_prefix_on_overflow,
+            serializer_provider=ChunkingSerializerProvider(),
         )
 
     def _build_result_metadata(self) -> dict[str, JsonValue]:

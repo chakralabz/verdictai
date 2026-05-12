@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from .restore_docling_document import restore_docling_document
+from . import restore_docling_document
 from .serializers import build_serializer_provider
 from .tokenizers import build_docling_tokenizer
 

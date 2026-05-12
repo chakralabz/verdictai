@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from docling_core.transforms.chunker.tokenizer.base import BaseTokenizer
 from docling_core.transforms.chunker.tokenizer.huggingface import HuggingFaceTokenizer
 
 from verdictai.ingestion.chunker.docling.options import DoclingTokenizerConfig
@@ -15,7 +16,7 @@ from verdictai.utils.errors import (
 def build_docling_tokenizer(
     *,
     config: DoclingTokenizerConfig,
-) -> object:
+) -> BaseTokenizer:
     """Build a Docling tokenizer aligned with the selected embedding model.
 
     Args:

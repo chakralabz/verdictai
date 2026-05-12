@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from docling_core.transforms.chunker.hierarchical_chunker import HierarchicalChunker
 
+from verdictai.ingestion.chunker.docling.base_docling_chunker import BaseDoclingChunker
 from verdictai.ingestion.chunker.docling.options import (
     DOCLING_HIERARCHICAL_CHUNKER_NAME,
 )
-from verdictai.ingestion.chunker.docling.base_docling_chunker import BaseDoclingChunker
 from verdictai.ingestion.chunker.docling.runtime.interfaces import (
     DoclingChunkerProtocol,
 )

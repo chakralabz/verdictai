@@ -9,25 +9,20 @@ through application code.
 from __future__ import annotations
 
 from collections.abc import Iterable
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
+from docling_core.transforms.chunker.base import BaseChunk
+from docling_core.types.doc.document import DoclingDocument
 
-class DoclingDocumentProtocol(Protocol):
-    """Marker protocol for a reconstructed Docling document."""
-
-
-class DoclingChunkProtocol(Protocol):
-    """Docling chunk shape consumed by the VerdictAI normalizer."""
-
-    text: str
-    meta: object
+DoclingDocumentProtocol = DoclingDocument
+DoclingChunkProtocol = BaseChunk
 
 
 @runtime_checkable
 class ChunkContextualizer(Protocol):
     """Docling chunker that can add heading/caption context to a chunk."""
 
-    def contextualize(self, chunk: DoclingChunkProtocol) -> str:
+    def contextualize(self, chunk: BaseChunk) -> str:
         """Return chunk text enriched with contextual metadata."""
 
 
@@ -39,11 +34,13 @@ class TokenCounter(Protocol):
         """Count tokens for the supplied text."""
 
 
+@runtime_checkable
 class DoclingChunkerProtocol(Protocol):
     """Chunker contract shared by Docling chunker implementations."""
 
     def chunk(
         self,
-        dl_doc: DoclingDocumentProtocol,
-    ) -> Iterable[DoclingChunkProtocol]:
+        dl_doc: DoclingDocument,
+        **kwargs: Any,
+    ) -> Iterable[BaseChunk]:
         """Yield chunks for a reconstructed Docling document."""

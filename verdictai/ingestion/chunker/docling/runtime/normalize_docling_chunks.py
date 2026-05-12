@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Sequence
-from typing import cast
 
 from verdictai.ingestion.chunker.docling.runtime.interfaces import (
     ChunkContextualizer,
@@ -187,13 +186,15 @@ def _extract_first_bbox(
     bboxes = _collect_bboxes(docling_chunk)
     if not bboxes:
         return None
-    return tuple(bboxes[0])
+    return bboxes[0]
 
 
 def _build_chunk_metadata(docling_chunk: DoclingChunkProtocol) -> dict[str, JsonValue]:
     """Build a JSON-safe metadata dictionary for one Docling chunk."""
 
-    metadata: dict[str, JsonValue] = {"docling_chunk_type": type(docling_chunk).__name__}
+    metadata: dict[str, JsonValue] = {
+        "docling_chunk_type": type(docling_chunk).__name__
+    }
     meta = _read_docling_attribute(docling_chunk, "meta")
 
     for field_name in ("schema_name", "section", "label"):
@@ -272,27 +273,36 @@ def _normalize_bbox(bbox: object | None) -> tuple[float, float, float, float] | 
     if isinstance(bbox, Sequence) and not isinstance(bbox, str | bytes):
         if len(bbox) != 4:
             return None
-        values = [_coerce_float(value) for value in bbox]
-        if all(value is not None for value in values):
-            return cast(tuple[float, float, float, float], tuple(values))
+        sequence_values: list[float] = []
+        for value in bbox:
+            float_value = _coerce_float(value)
+            if float_value is None:
+                return None
+            sequence_values.append(float_value)
+        left, top, right, bottom = sequence_values
+        return left, top, right, bottom
 
-    values = []
+    bbox_values: list[float] = []
     for attribute in ("l", "t", "r", "b"):
         value = _coerce_float(_read_docling_attribute(bbox, attribute))
         if value is None:
-            values = []
+            bbox_values = []
             break
-        values.append(value)
-    if len(values) == 4:
-        return tuple(values)
+        bbox_values.append(value)
+    if len(bbox_values) == 4:
+        left, top, right, bottom = bbox_values
+        return left, top, right, bottom
 
-    values = []
+    bbox_values = []
     for attribute in ("left", "top", "right", "bottom"):
         value = _coerce_float(_read_docling_attribute(bbox, attribute))
         if value is None:
             return None
-        values.append(value)
-    return tuple(values) if len(values) == 4 else None
+        bbox_values.append(value)
+    if len(bbox_values) != 4:
+        return None
+    left, top, right, bottom = bbox_values
+    return left, top, right, bottom
 
 
 def _count_tokens(*, docling_chunker: DoclingChunkerProtocol, text: str) -> int | None:
