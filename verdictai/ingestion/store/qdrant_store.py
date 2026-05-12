@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 from uuid import NAMESPACE_URL, uuid5
 
 from verdictai.ingestion.embeddings.schemas import EmbeddedChunk, EmbeddingResult
@@ -11,6 +11,9 @@ from verdictai.ingestion.parser.types import JsonValue
 from verdictai.ingestion.store.config import QdrantStoreConfig
 from verdictai.ingestion.store.generic_store import normalize_embeddings
 from verdictai.ingestion.store.schemas import StoreResult
+
+if TYPE_CHECKING:
+    from qdrant_client.models import ScoredPoint
 
 
 class QdrantStore:
@@ -40,6 +43,7 @@ class QdrantStore:
         self.config = config
         self._client: Any | None = None
         self._async_client: Any | None = None
+        self._sparse_model: Any | None = None
 
     def ensure_collection(self, *, vector_size: int) -> None:
         """Ensure the configured Qdrant collection exists."""
@@ -108,6 +112,60 @@ class QdrantStore:
 
         return self._store_result(chunks=chunks, point_ids=point_ids)
 
+    def hybrid_search(
+        self,
+        dense_vec: Sequence[float],
+        sparse_indices: Sequence[int],
+        sparse_values: Sequence[float],
+        top_k: int = 5,
+        filters: Any | None = None,
+    ) -> list[ScoredPoint]:
+        """Search chunks with Qdrant native dense and sparse RRF fusion.
+
+        Args:
+            dense_vec: Dense query embedding.
+            sparse_indices: BM25 sparse query vector indices.
+            sparse_values: BM25 sparse query vector values.
+            top_k: Maximum number of fused results to return. Defaults to 5.
+            filters: Optional Qdrant payload filter.
+
+        Returns:
+            Qdrant scored points ranked by reciprocal rank fusion.
+
+        Raises:
+            RuntimeError: If Qdrant hybrid search fails.
+        """
+
+        _, client_cls, models = _import_qdrant()
+        client = self._get_client(client_cls)
+        try:
+            response = client.query_points(
+                collection_name=self.config.collection_name,
+                prefetch=[
+                    models.Prefetch(
+                        query={self.config.dense_vector_name: list(dense_vec)},
+                        limit=top_k * 4,
+                    ),
+                    models.Prefetch(
+                        query={
+                            self.config.sparse_vector_name: models.SparseVector(
+                                indices=list(sparse_indices),
+                                values=list(sparse_values),
+                            )
+                        },
+                        limit=top_k * 4,
+                    ),
+                ],
+                query=models.FusionQuery(fusion=models.Fusion.RRF),
+                query_filter=filters,
+                limit=top_k,
+                with_payload=True,
+            )
+        except Exception as exc:
+            raise RuntimeError("Qdrant hybrid search failed.") from exc
+
+        return list(response.points)
+
     async def store_embeddings_async(
         self,
         embeddings: Sequence[EmbeddedChunk] | EmbeddingResult,
@@ -161,6 +219,16 @@ class QdrantStore:
             self._async_client = async_client_cls(**self._client_kwargs())
         return self._async_client
 
+    def _get_sparse_model(self) -> Any:
+        """Return the lazily initialized FastEmbed sparse text model."""
+
+        if self._sparse_model is None:
+            sparse_text_embedding_cls = _import_sparse_text_embedding()
+            self._sparse_model = sparse_text_embedding_cls(
+                model_name=self.config.sparse_model_name
+            )
+        return self._sparse_model
+
     def _client_kwargs(self) -> dict[str, Any]:
         """Build keyword arguments shared by sync and async clients."""
 
@@ -200,20 +268,39 @@ class QdrantStore:
     ) -> list[Any]:
         """Convert embedded chunks into Qdrant point structures."""
 
-        return [
-            models.PointStruct(
-                id=_point_id(chunk),
-                vector={
-                    self.config.dense_vector_name: chunk.embedding,
-                    self.config.sparse_vector_name: models.Document(
-                        text=chunk.text,
-                        model=self.config.sparse_model_name,
-                    ),
-                },
-                payload=_payload(chunk),
+        points = []
+        for chunk in chunks:
+            sparse_indices, sparse_values = self._compute_sparse(chunk.text)
+            points.append(
+                models.PointStruct(
+                    id=_point_id(chunk),
+                    vector={
+                        self.config.dense_vector_name: chunk.embedding,
+                        self.config.sparse_vector_name: models.SparseVector(
+                            indices=sparse_indices,
+                            values=sparse_values,
+                        ),
+                    },
+                    payload=_payload(chunk),
+                )
             )
-            for chunk in chunks
-        ]
+        return points
+
+    def _compute_sparse(self, text: str) -> tuple[list[int], list[float]]:
+        """Compute one BM25 sparse vector with FastEmbed.
+
+        Args:
+            text: Chunk or query text to encode.
+
+        Returns:
+            Tuple containing sparse vector indices and values.
+        """
+
+        sparse_vector = next(iter(self._get_sparse_model().embed([text])))
+        return (
+            _array_to_list(sparse_vector.indices),
+            _array_to_list(sparse_vector.values),
+        )
 
     def _validate_embedding_dimensions(self, chunks: Sequence[EmbeddedChunk]) -> None:
         """Ensure one write request does not mix embedding dimensions."""
@@ -290,6 +377,20 @@ def _import_qdrant() -> tuple[Any, Any, Any]:
     return AsyncQdrantClient, QdrantClient, models
 
 
+def _import_sparse_text_embedding() -> Any:
+    """Import FastEmbed's sparse text embedding model lazily.
+
+    Raises:
+        ImportError: If FastEmbed is unavailable.
+    """
+
+    try:
+        from fastembed import SparseTextEmbedding
+    except ImportError as exc:
+        raise ImportError("Install `fastembed` to compute BM25 sparse vectors.") from exc
+    return SparseTextEmbedding
+
+
 def _qdrant_distance(*, models: Any, distance: str) -> Any:
     """Map VerdictAI config values to Qdrant distance constants."""
 
@@ -323,6 +424,14 @@ def _payload(chunk: EmbeddedChunk) -> dict[str, JsonValue]:
         "embedding_dimension": chunk.embedding_dimension,
         "metadata": cast(JsonValue, chunk.metadata),
     }
+
+
+def _array_to_list(values: Any) -> list[Any]:
+    """Convert FastEmbed numpy-like values into plain Python lists."""
+
+    if hasattr(values, "tolist"):
+        return list(values.tolist())
+    return list(values)
 
 
 def _batched(
