@@ -2,19 +2,16 @@
 
 from __future__ import annotations
 
-
 from .docling import (
     DoclingChunkerConfig,
+    DoclingHierarchicalChunker,
+    DoclingHybridChunker,
+    DoclingLineBasedChunker,
     DoclingSerializerConfig,
     DoclingTokenizerConfig,
 )
 from .document_chunker import DocumentChunkerProtocol
 from .schemas import Chunk, ChunkingResult
-from .docling import (
-    DoclingHierarchicalChunker,
-    DoclingHybridChunker,
-    DoclingLineBasedChunker,
-)
 
 __all__ = [
     "Chunk",

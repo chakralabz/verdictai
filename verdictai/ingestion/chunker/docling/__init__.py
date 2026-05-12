@@ -2,16 +2,14 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
+from .hierarchical_chunker import DoclingHierarchicalChunker
+from .hybrid_chunker import DoclingHybridChunker
+from .line_based_chunker import DoclingLineBasedChunker
 from .options import (
     DoclingChunkerConfig,
     DoclingSerializerConfig,
     DoclingTokenizerConfig,
 )
-from .hierarchical_chunker import DoclingHierarchicalChunker
-from .hybrid_chunker import DoclingHybridChunker
-from .line_based_chunker import DoclingLineBasedChunker
 
 __all__ = [
     "DoclingChunkerConfig",
