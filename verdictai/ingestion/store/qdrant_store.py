@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
-from typing import Any
+from typing import Any, cast
 from uuid import NAMESPACE_URL, uuid5
 
 from verdictai.ingestion.embeddings.schemas import EmbeddedChunk, EmbeddingResult
@@ -321,7 +321,7 @@ def _payload(chunk: EmbeddedChunk) -> dict[str, JsonValue]:
         "embedding_model": chunk.embedding_model,
         "embedding_provider": chunk.embedding_provider,
         "embedding_dimension": chunk.embedding_dimension,
-        "metadata": chunk.metadata,
+        "metadata": cast(JsonValue, chunk.metadata),
     }
 
 
