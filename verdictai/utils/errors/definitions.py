@@ -93,6 +93,30 @@ CHUNKER_UNSUPPORTED_TOKENIZER_PROVIDER: Final[ErrorDefinition] = {
     "error_message": "Unsupported tokenizer provider: {provider}",
 }
 
+EMBEDDING_DEPENDENCY_MISSING: Final[ErrorDefinition] = {
+    "error_code": "EMBEDDING_001",
+    "error_message": (
+        "Embedding dependency '{dependency}' is unavailable. Install the required "
+        "embedding dependencies before using backend '{backend}'."
+    ),
+}
+EMBEDDING_MODEL_LOAD_FAILED: Final[ErrorDefinition] = {
+    "error_code": "EMBEDDING_002",
+    "error_message": "Could not load embedding model '{model_name}'.",
+}
+EMBEDDING_GENERATION_FAILED: Final[ErrorDefinition] = {
+    "error_code": "EMBEDDING_003",
+    "error_message": "Embedding provider '{provider}' failed to generate embeddings.",
+}
+EMBEDDING_API_KEY_MISSING: Final[ErrorDefinition] = {
+    "error_code": "EMBEDDING_004",
+    "error_message": "Configure an API key for hosted embeddings.",
+}
+EMBEDDING_RESPONSE_INVALID: Final[ErrorDefinition] = {
+    "error_code": "EMBEDDING_005",
+    "error_message": "Embedding provider '{provider}' returned an invalid response.",
+}
+
 
 ERROR_DEFINITIONS: Final[dict[str, ErrorDefinition]] = {
     definition["error_code"]: definition
@@ -111,5 +135,10 @@ ERROR_DEFINITIONS: Final[dict[str, ErrorDefinition]] = {
         CHUNKER_DOCLING_METADATA_INVALID,
         CHUNKER_OPENAI_TOKENIZER_DEPENDENCY_MISSING,
         CHUNKER_UNSUPPORTED_TOKENIZER_PROVIDER,
+        EMBEDDING_DEPENDENCY_MISSING,
+        EMBEDDING_MODEL_LOAD_FAILED,
+        EMBEDDING_GENERATION_FAILED,
+        EMBEDDING_API_KEY_MISSING,
+        EMBEDDING_RESPONSE_INVALID,
     )
 }

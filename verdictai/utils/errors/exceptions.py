@@ -82,6 +82,10 @@ class DoclingChunkerError(VerdictAIRuntimeError):
     """Raised when Docling chunking cannot be completed."""
 
 
+class EmbeddingError(VerdictAIRuntimeError):
+    """Raised when embedding generation cannot be completed."""
+
+
 def _format_error_message(template: str, context: dict[str, Any]) -> str:
     """Format an error template while tolerating partial context.
 
