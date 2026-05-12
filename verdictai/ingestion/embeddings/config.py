@@ -28,6 +28,8 @@ class EmbeddingConfig:
         batch_size: Maximum number of texts sent to one provider request.
         max_concurrency: Maximum concurrent hosted requests in async mode.
         request_timeout_seconds: Timeout for hosted embedding HTTP requests.
+        max_retries: Number of SDK-level retries for transient hosted provider
+            failures.
         api_key: Hosted provider API key. This may be supplied literally or
             through YAML environment interpolation such as `${OPENAI_API_KEY}`.
         endpoint_url: OpenAI-compatible embeddings endpoint.
@@ -43,6 +45,7 @@ class EmbeddingConfig:
     batch_size: int = 64
     max_concurrency: int = 4
     request_timeout_seconds: float = 60.0
+    max_retries: int = 2
     api_key: str | None = None
     endpoint_url: str = DEFAULT_OPENAI_EMBEDDINGS_URL
     organization: str | None = None

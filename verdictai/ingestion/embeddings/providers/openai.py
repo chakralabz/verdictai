@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-import json
-import urllib.error
-import urllib.request
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 from verdictai.ingestion.embeddings.config import (
     DEFAULT_HOSTED_EMBEDDING_MODEL,
@@ -23,7 +21,7 @@ from verdictai.utils.errors import (
 
 
 class OpenAIEmbeddingProvider(Embedder):
-    """Generate embeddings through an OpenAI-compatible HTTP endpoint."""
+    """Generate embeddings through the official OpenAI Python SDK."""
 
     provider_name = "openai"
 
@@ -52,6 +50,7 @@ class OpenAIEmbeddingProvider(Embedder):
                 batch_size=settings_config.batch_size,
                 max_concurrency=settings_config.max_concurrency,
                 request_timeout_seconds=settings_config.request_timeout_seconds,
+                max_retries=settings_config.max_retries,
                 api_key=settings_config.api_key,
                 endpoint_url=settings_config.endpoint_url,
                 organization=settings_config.organization,
@@ -72,6 +71,7 @@ class OpenAIEmbeddingProvider(Embedder):
                 batch_size=config.batch_size,
                 max_concurrency=config.max_concurrency,
                 request_timeout_seconds=config.request_timeout_seconds,
+                max_retries=config.max_retries,
                 api_key=config.api_key,
                 endpoint_url=config.endpoint_url,
                 organization=config.organization,
@@ -79,6 +79,8 @@ class OpenAIEmbeddingProvider(Embedder):
             )
         else:
             self.config = config
+        self._client: Any | None = None
+        self._async_client: Any | None = None
 
     @property
     def model_name(self) -> str:
@@ -96,7 +98,18 @@ class OpenAIEmbeddingProvider(Embedder):
 
         if not texts:
             return []
-        response = self._post_embeddings(texts)
+        try:
+            response = self._get_client().embeddings.create(
+                input=texts,
+                model=self.config.model_name,
+                **self._request_options(),
+            )
+        except _openai_api_error_types() as exc:
+            raise EmbeddingError(
+                EMBEDDING_GENERATION_FAILED,
+                _sdk_error_detail(exc),
+                provider=self.provider_name,
+            ) from exc
         return _extract_vectors(response, expected_count=len(texts))
 
     async def generate_embedding_async(self, text: str) -> list[float]:
@@ -108,7 +121,7 @@ class OpenAIEmbeddingProvider(Embedder):
         self,
         texts: list[str],
     ) -> list[list[float]]:
-        """Generate hosted embeddings using bounded concurrent HTTP requests."""
+        """Generate hosted embeddings using bounded concurrent SDK requests."""
 
         if not texts:
             return []
@@ -120,13 +133,67 @@ class OpenAIEmbeddingProvider(Embedder):
 
         async def embed_batch(batch: list[str]) -> list[list[float]]:
             async with semaphore:
-                return await asyncio.to_thread(self.generate_batch_embeddings, batch)
+                try:
+                    response = await self._get_async_client().embeddings.create(
+                        input=batch,
+                        model=self.config.model_name,
+                        **self._request_options(),
+                    )
+                except _openai_api_error_types() as exc:
+                    raise EmbeddingError(
+                        EMBEDDING_GENERATION_FAILED,
+                        _sdk_error_detail(exc),
+                        provider=self.provider_name,
+                    ) from exc
+                return _extract_vectors(response, expected_count=len(batch))
 
         results = await asyncio.gather(*(embed_batch(batch) for batch in batches))
         return [vector for batch in results for vector in batch]
 
-    def _post_embeddings(self, texts: list[str]) -> dict[str, Any]:
-        """Post one embeddings request to the configured endpoint."""
+    def close(self) -> None:
+        """Close the underlying synchronous SDK client when initialized."""
+
+        if self._client is not None:
+            self._client.close()
+            self._client = None
+
+    async def close_async(self) -> None:
+        """Close the underlying asynchronous SDK client when initialized."""
+
+        if self._async_client is not None:
+            await self._async_client.close()
+            self._async_client = None
+
+    def _get_client(self) -> Any:
+        """Return a lazily initialized OpenAI SDK client.
+
+        Raises:
+            EmbeddingError: If the hosted provider API key is not configured.
+            ImportError: If the OpenAI SDK dependency is unavailable.
+        """
+
+        if self._client is None:
+            kwargs = self._client_kwargs()
+            _, client_cls, _ = _import_openai()
+            self._client = client_cls(**kwargs)
+        return self._client
+
+    def _get_async_client(self) -> Any:
+        """Return a lazily initialized asynchronous OpenAI SDK client.
+
+        Raises:
+            EmbeddingError: If the hosted provider API key is not configured.
+            ImportError: If the OpenAI SDK dependency is unavailable.
+        """
+
+        if self._async_client is None:
+            kwargs = self._client_kwargs()
+            _, _, async_client_cls = _import_openai()
+            self._async_client = async_client_cls(**kwargs)
+        return self._async_client
+
+    def _client_kwargs(self) -> dict[str, Any]:
+        """Build keyword arguments shared by sync and async SDK clients."""
 
         api_key = self.config.api_key
         if not api_key:
@@ -134,65 +201,39 @@ class OpenAIEmbeddingProvider(Embedder):
                 EMBEDDING_API_KEY_MISSING,
             )
 
-        payload: dict[str, Any] = {
-            "model": self.config.model_name,
-            "input": texts,
-        }
-        if self.config.dimensions is not None:
-            payload["dimensions"] = self.config.dimensions
-
-        request = urllib.request.Request(
-            self.config.endpoint_url,
-            data=json.dumps(payload).encode("utf-8"),
-            headers=self._headers(api_key),
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(
-                request,
-                timeout=self.config.request_timeout_seconds,
-            ) as response:
-                return json.loads(response.read().decode("utf-8"))
-        except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="replace")
-            raise EmbeddingError(
-                EMBEDDING_GENERATION_FAILED,
-                f"Hosted embedding request failed with HTTP {exc.code}: {detail}",
-                provider=self.provider_name,
-            ) from exc
-        except (OSError, json.JSONDecodeError) as exc:
-            raise EmbeddingError(
-                EMBEDDING_GENERATION_FAILED,
-                provider=self.provider_name,
-            ) from exc
-
-    def _headers(self, api_key: str) -> dict[str, str]:
-        """Build request headers for an OpenAI-compatible endpoint."""
-
-        headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
+        kwargs: dict[str, Any] = {
+            "api_key": api_key,
+            "base_url": _base_url_from_endpoint_url(self.config.endpoint_url),
+            "timeout": self.config.request_timeout_seconds,
+            "max_retries": self.config.max_retries,
         }
         if self.config.organization is not None:
-            headers["OpenAI-Organization"] = self.config.organization
-        return headers
+            kwargs["organization"] = self.config.organization
+        return kwargs
+
+    def _request_options(self) -> dict[str, int]:
+        """Build per-request embedding options supported by hosted models."""
+
+        if self.config.dimensions is None:
+            return {}
+        return {"dimensions": self.config.dimensions}
 
 
 def _extract_vectors(
-    response: dict[str, Any],
+    response: Any,
     *,
     expected_count: int,
 ) -> list[list[float]]:
-    """Extract ordered vectors from an OpenAI-compatible response."""
+    """Extract ordered vectors from an OpenAI SDK embeddings response."""
 
-    data = response.get("data")
+    data = getattr(response, "data", None)
     if not isinstance(data, list):
         raise EmbeddingError(EMBEDDING_RESPONSE_INVALID, provider="openai")
 
-    ordered = sorted(data, key=lambda item: item.get("index", 0))
+    ordered = sorted(data, key=lambda item: getattr(item, "index", 0))
     vectors: list[list[float]] = []
     for item in ordered:
-        embedding = item.get("embedding") if isinstance(item, dict) else None
+        embedding = getattr(item, "embedding", None)
         if not isinstance(embedding, list):
             raise EmbeddingError(EMBEDDING_RESPONSE_INVALID, provider="openai")
         vectors.append([float(value) for value in embedding])
@@ -200,3 +241,60 @@ def _extract_vectors(
     if len(vectors) != expected_count:
         raise EmbeddingError(EMBEDDING_RESPONSE_INVALID, provider="openai")
     return vectors
+
+
+def _import_openai() -> tuple[Any, Any, Any]:
+    """Import OpenAI SDK dependencies only when hosted embeddings are used.
+
+    Raises:
+        ImportError: If the OpenAI Python SDK is unavailable.
+    """
+
+    try:
+        import openai
+        from openai import AsyncOpenAI, OpenAI
+    except ImportError as exc:
+        raise ImportError("Install `openai` to use OpenAIEmbeddingProvider.") from exc
+    return openai, OpenAI, AsyncOpenAI
+
+
+def _openai_api_error_types() -> tuple[type[Exception], ...]:
+    """Return SDK exception classes that represent provider request failures."""
+
+    openai, _, _ = _import_openai()
+    return (openai.APIError,)
+
+
+def _sdk_error_detail(exc: Exception) -> str:
+    """Build a concise hosted embedding failure detail from an SDK exception."""
+
+    status_code = getattr(exc, "status_code", None)
+    if status_code is None:
+        return str(exc)
+    return f"Hosted embedding request failed with HTTP {status_code}: {exc}"
+
+
+def _base_url_from_endpoint_url(endpoint_url: str) -> str:
+    """Return the SDK base URL for an OpenAI-compatible embeddings endpoint.
+
+    Args:
+        endpoint_url: Either a base API URL such as `https://api.openai.com/v1`
+            or the historical embeddings URL ending in `/embeddings`.
+
+    Returns:
+        Base URL accepted by the OpenAI SDK.
+    """
+
+    split_url = urlsplit(endpoint_url)
+    path = split_url.path.rstrip("/")
+    if path.endswith("/embeddings"):
+        path = path.removesuffix("/embeddings") or "/"
+    return urlunsplit(
+        (
+            split_url.scheme,
+            split_url.netloc,
+            path,
+            split_url.query,
+            split_url.fragment,
+        )
+    )
